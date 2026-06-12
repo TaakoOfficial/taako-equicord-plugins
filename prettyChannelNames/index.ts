@@ -18,6 +18,8 @@ let queued = false;
 const originalTextNodes = new WeakMap<Text, string>();
 const touchedTextNodes = new Set<Text>();
 
+// Optional: words that should stay fully capitalized.
+// Add/remove any you want.
 const ACRONYMS = new Set([
     "sasp",
     "bcso",
@@ -57,6 +59,17 @@ function prettyChannelName(input: string): string {
     const hasHash = trimmed.startsWith("#");
     const rawName = trimmed.replace(/^#\s*/, "");
 
+    /*
+        Supports:
+        general-chat          -> General Chat
+        clock-in              -> Clock In
+        clock-CORRECTION      -> Clock Correction
+        『🎥』video-clips      -> 『🎥』Video Clips
+        【🚓】sasp-chat        -> 【🚓】SASP Chat
+        『📁』loa-request      -> 『📁』LOA Request
+
+        It keeps emoji/symbol prefixes and formats the actual channel name.
+    */
     const match = rawName.match(/^([^A-Za-z0-9]*)([A-Za-z0-9][A-Za-z0-9\s-]*)$/);
 
     if (!match) return input;
