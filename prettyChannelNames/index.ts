@@ -1,8 +1,33 @@
-import definePlugin from "@utils/types";
+import { definePluginSettings } from "@api/Settings";
+import definePlugin, { OptionType } from "@utils/types";
 
-const USE_ALL_CAPS = false;
-// false = General Chat
-// true = GENERAL CHAT
+const settings = definePluginSettings({
+    replaceHyphens: {
+        type: OptionType.BOOLEAN,
+        description: "Replace hyphens with spaces",
+        default: true,
+        onChange: queueRefresh,
+    },
+    capitalizeWords: {
+        type: OptionType.BOOLEAN,
+        description: "Capitalize the first letter of each word",
+        default: true,
+        onChange: queueRefresh,
+    },
+    useAllCaps: {
+        type: OptionType.BOOLEAN,
+        description: "Display the entire channel name in uppercase",
+        default: false,
+        onChange: queueRefresh,
+    },
+    acronyms: {
+        type: OptionType.STRING,
+        description: "Words to keep uppercase, separated by commas or spaces",
+        placeholder: "API, FAQ, RP",
+        default: "",
+        onChange: queueRefresh,
+    },
+});
 
 const CHANNEL_ROOT_SELECTOR = [
     'a[href^="/channels/"][aria-label*="text channel" i]',
@@ -14,26 +39,30 @@ const CHANNEL_ROOT_SELECTOR = [
 
 let observer: MutationObserver | undefined;
 let queued = false;
+let refreshQueued = false;
+let animationFrame: number | undefined;
 
 const originalTextNodes = new WeakMap<Text, string>();
 const touchedTextNodes = new Set<Text>();
 
-// Optional: words that should stay fully capitalized.
-// Add/remove any you want.
-const ACRONYMS = new Set([
-    "sasp",
-    "bcso",
-    "lspd",
-    "ems",
-    "saems",
-    "doj",
-    "cad",
-    "mdt",
-    "sop",
-    "loa",
-    "bolo",
-    "rp",
-]);
+let cachedAcronymSetting = "";
+let cachedAcronyms = new Set<string>();
+
+function getAcronyms(): Set<string> {
+    const configured = settings.store.acronyms;
+
+    if (configured === cachedAcronymSetting) return cachedAcronyms;
+
+    cachedAcronymSetting = configured;
+    cachedAcronyms = new Set(
+        configured
+            .toLowerCase()
+            .split(/[\s,]+/)
+            .filter(Boolean)
+    );
+
+    return cachedAcronyms;
+}
 
 function formatWord(word: string): string {
     const cleaned = word.trim();
@@ -42,9 +71,11 @@ function formatWord(word: string): string {
 
     const lower = cleaned.toLowerCase();
 
-    if (USE_ALL_CAPS) return lower.toUpperCase();
+    if (settings.store.useAllCaps) return lower.toUpperCase();
 
-    if (ACRONYMS.has(lower)) return lower.toUpperCase();
+    if (getAcronyms().has(lower)) return lower.toUpperCase();
+
+    if (!settings.store.capitalizeWords) return lower;
 
     return lower.charAt(0).toUpperCase() + lower.slice(1);
 }
@@ -65,8 +96,8 @@ function prettyChannelName(input: string): string {
         clock-in              -> Clock In
         clock-CORRECTION      -> Clock Correction
         『🎥』video-clips      -> 『🎥』Video Clips
-        【🚓】sasp-chat        -> 【🚓】SASP Chat
-        『📁』loa-request      -> 『📁』LOA Request
+        【🚓】police-chat      -> 【🚓】Police Chat
+        『📁』faq-request      -> 『📁』FAQ Request (when FAQ is configured)
 
         It keeps emoji/symbol prefixes and formats the actual channel name.
     */
@@ -77,11 +108,11 @@ function prettyChannelName(input: string): string {
     const prefix = match[1];
     const channelNamePart = match[2];
 
-    const formatted = channelNamePart
-        .split(/[-\s]+/)
-        .filter(Boolean)
-        .map(formatWord)
-        .join(" ");
+    let formatted = channelNamePart.replace(/[A-Za-z0-9]+/g, formatWord);
+
+    if (settings.store.replaceHyphens) {
+        formatted = formatted.replace(/[-\s]+/g, " ");
+    }
 
     return `${leadingSpace}${hasHash ? "# " : ""}${prefix}${formatted}${trailingSpace}`;
 }
@@ -138,26 +169,55 @@ function run(): void {
         .forEach(prettifyElement);
 }
 
+function restoreOriginalNames(): void {
+    for (const node of touchedTextNodes) {
+        const original = originalTextNodes.get(node);
+
+        if (original !== undefined && node.isConnected) {
+            node.nodeValue = original;
+        }
+    }
+
+    touchedTextNodes.clear();
+}
+
 function queueRun(): void {
-    if (queued) return;
+    if (queued || !observer) return;
 
     queued = true;
 
-    requestAnimationFrame(() => {
+    animationFrame = requestAnimationFrame(() => {
         queued = false;
+        animationFrame = undefined;
+
+        if (!observer) return;
+
+        if (refreshQueued) {
+            refreshQueued = false;
+            restoreOriginalNames();
+        }
+
         run();
     });
+}
+
+function queueRefresh(): void {
+    if (!observer) return;
+
+    refreshQueued = true;
+    queueRun();
 }
 
 export default definePlugin({
     name: "PrettyChannelNames",
     description: "Displays text channel names with spaces and capital letters instead of Discord's lowercase-dash format.",
     authors: [{ name: "Taako", id: 0n }],
+    settings,
 
     start() {
         run();
 
-        observer = new MutationObserver(queueRun);
+        observer = new MutationObserver(() => queueRun());
 
         observer.observe(document.body, {
             childList: true,
@@ -170,14 +230,13 @@ export default definePlugin({
         observer?.disconnect();
         observer = undefined;
 
-        for (const node of touchedTextNodes) {
-            const original = originalTextNodes.get(node);
-
-            if (original && node.isConnected) {
-                node.nodeValue = original;
-            }
+        if (animationFrame !== undefined) {
+            cancelAnimationFrame(animationFrame);
+            animationFrame = undefined;
         }
 
-        touchedTextNodes.clear();
+        queued = false;
+        refreshQueued = false;
+        restoreOriginalNames();
     },
 });
