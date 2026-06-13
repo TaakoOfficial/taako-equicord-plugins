@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Taako
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType } from "@utils/types";
 
@@ -43,6 +49,7 @@ let refreshQueued = false;
 let animationFrame: number | undefined;
 
 const originalTextNodes = new WeakMap<Text, string>();
+const formattedTextNodes = new WeakMap<Text, string>();
 const touchedTextNodes = new Set<Text>();
 
 let cachedAcronymSetting = "";
@@ -150,6 +157,11 @@ function prettifyElement(element: Element): void {
 
     for (const node of textNodes) {
         const current = node.nodeValue ?? "";
+
+        if (originalTextNodes.has(node) && formattedTextNodes.get(node) !== current) {
+            originalTextNodes.set(node, current);
+        }
+
         const next = prettyChannelName(current);
 
         if (next === current) continue;
@@ -159,6 +171,7 @@ function prettifyElement(element: Element): void {
         }
 
         touchedTextNodes.add(node);
+        formattedTextNodes.set(node, next);
         node.nodeValue = next;
     }
 }
@@ -176,6 +189,8 @@ function restoreOriginalNames(): void {
         if (original !== undefined && node.isConnected) {
             node.nodeValue = original;
         }
+
+        formattedTextNodes.delete(node);
     }
 
     touchedTextNodes.clear();
@@ -211,7 +226,7 @@ function queueRefresh(): void {
 export default definePlugin({
     name: "PrettyChannelNames",
     description: "Displays text channel names with spaces and capital letters instead of Discord's lowercase-dash format.",
-    authors: [{ name: "Taako", id: 0n }],
+    authors: [{ name: "Taako", id: 103720027483545600n }],
     settings,
 
     start() {
