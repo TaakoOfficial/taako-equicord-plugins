@@ -137,7 +137,7 @@ export default definePlugin({
         {
             find: "loadAllGuildAndPrivateChannelsFromDisk(){",
             replacement: {
-                match: /(?<=getChannel\(\i\)\{if\(null!=\i\)return )([^;]+)/,
+                match: /(?<=getChannel\(\i\)\{if\(null!=\i\)return )(.+?)(?=\})/,
                 replace: "$self.applyAlias($1)",
             },
         },

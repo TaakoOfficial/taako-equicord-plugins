@@ -11,6 +11,7 @@ import * as DataStore from "@api/DataStore";
 import { ChannelToolbarButton } from "@api/HeaderBar";
 import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
+import { Button } from "@components/Button";
 import { HeadingSecondary } from "@components/Heading";
 import { Paragraph } from "@components/Paragraph";
 import definePlugin, { IconComponent, OptionType } from "@utils/types";
@@ -22,13 +23,17 @@ import {
     NavigationRouter,
     openModal,
     SelectedChannelStore,
+    showToast,
     TextArea,
+    Toasts,
     useEffect,
     useState,
     useStateFromStores,
 } from "@webpack/common";
 
 const DATASTORE_KEY = "ChannelScratchpad.entries";
+const RETRY_DELAY = 30_000;
+const MAX_TIMEOUT = 2_147_000_000;
 
 interface ScratchpadEntry {
     notes: string;
@@ -39,20 +44,40 @@ interface ScratchpadEntry {
 type ScratchpadEntries = Record<string, ScratchpadEntry>;
 
 let entries: ScratchpadEntries = {};
-let reminderInterval: number | undefined;
+let reminderTimer: number | undefined;
+let running = false;
+let checkingReminders = false;
 
 const listeners = new Set<() => void>();
+
+function handleReminderSettingChange(): void {
+    if (settings.store.reminders) {
+        void runReminderCheck();
+    } else {
+        clearReminderTimer();
+    }
+}
 
 const settings = definePluginSettings({
     reminders: {
         type: OptionType.BOOLEAN,
         description: "Show notifications when channel reminders are due",
         default: true,
+        onChange: handleReminderSettingChange,
     },
     hideEmptyButton: {
         type: OptionType.BOOLEAN,
         description: "Hide the channel toolbar button until the channel has a saved scratchpad",
         default: false,
+    },
+    testNotification: {
+        type: OptionType.COMPONENT,
+        description: "Send a test reminder using your current Equicord notification settings",
+        component: () => (
+            <Button onClick={() => sendReminderNotification("Channel Scratchpad Test", "Notifications are working.")}>
+                Send Test Notification
+            </Button>
+        ),
     },
 });
 
@@ -111,6 +136,14 @@ async function saveEntry(channelId: string, notes: string, reminderAt: number | 
 
     await DataStore.set(DATASTORE_KEY, entries);
     emitChange();
+    scheduleReminderCheck();
+
+    if (reminderAt) {
+        showToast(
+            `Scratchpad reminder set for ${new Date(reminderAt).toLocaleString()}`,
+            Toasts.Type.SUCCESS
+        );
+    }
 }
 
 function ScratchpadModal({ channel, modalProps }: {
@@ -252,8 +285,6 @@ const patchChannelContextMenu: NavContextMenuPatchCallback = (children, { channe
 };
 
 async function checkReminders(): Promise<void> {
-    if (!settings.store.reminders) return;
-
     const now = Date.now();
     let changed = false;
 
@@ -261,31 +292,87 @@ async function checkReminders(): Promise<void> {
         if (!entry.reminderAt || entry.reminderAt > now) continue;
 
         const channel = ChannelStore.getChannel(channelId);
+        if (!channel) continue;
+
+        const channelName = formatChannelName(channel);
+        const body = entry.notes
+            ? entry.notes.slice(0, 180)
+            : `Reminder for ${channelName}`;
+
+        sendReminderNotification(`Channel Scratchpad: ${channelName}`, body, () => {
+            NavigationRouter.transitionTo(`/channels/${channel.guild_id || "@me"}/${channel.id}`);
+        });
+
         if (entry.notes) {
             entry.reminderAt = null;
         } else {
             delete entries[channelId];
         }
         changed = true;
-
-        if (!channel) continue;
-
-        const body = entry.notes
-            ? entry.notes.slice(0, 180)
-            : `Reminder for ${formatChannelName(channel)}`;
-
-        void showNotification({
-            title: `Channel Scratchpad: ${formatChannelName(channel)}`,
-            body,
-            onClick: () => NavigationRouter.transitionTo(
-                `/channels/${channel.guild_id || "@me"}/${channel.id}`
-            ),
-        });
     }
 
     if (changed) {
         await DataStore.set(DATASTORE_KEY, entries);
         emitChange();
+    }
+}
+
+function sendReminderNotification(title: string, body: string, onClick?: () => void): void {
+    showToast(title, Toasts.Type.CLOCK, {
+        duration: 10_000,
+        position: Toasts.Position.TOP,
+    });
+
+    void showNotification({
+        title,
+        body,
+        dismissOnClick: true,
+        onClick,
+    }).catch(error => console.error("[ChannelScratchpad] Failed to show reminder notification:", error));
+}
+
+function clearReminderTimer(): void {
+    if (reminderTimer === undefined) return;
+
+    window.clearTimeout(reminderTimer);
+    reminderTimer = undefined;
+}
+
+function scheduleReminderCheck(): void {
+    clearReminderTimer();
+
+    if (!running || !settings.store.reminders) return;
+
+    const reminderTimes = Object.values(entries)
+        .map(entry => entry.reminderAt)
+        .filter((timestamp): timestamp is number => timestamp !== null);
+
+    if (!reminderTimes.length) return;
+
+    const nextReminder = Math.min(...reminderTimes);
+    const remaining = nextReminder - Date.now();
+    const delay = remaining <= 0
+        ? RETRY_DELAY
+        : Math.min(remaining, MAX_TIMEOUT);
+
+    reminderTimer = window.setTimeout(() => {
+        reminderTimer = undefined;
+        void runReminderCheck();
+    }, delay);
+}
+
+async function runReminderCheck(): Promise<void> {
+    if (!running || !settings.store.reminders || checkingReminders) return;
+
+    checkingReminders = true;
+
+    try {
+        await checkReminders();
+    } catch (error) {
+        console.error("[ChannelScratchpad] Failed to check reminders:", error);
+    } finally {
+        checkingReminders = false;
+        scheduleReminderCheck();
     }
 }
 
@@ -308,18 +395,16 @@ export default definePlugin({
     },
 
     async start() {
+        running = true;
         entries = await DataStore.get<ScratchpadEntries>(DATASTORE_KEY) ?? {};
         emitChange();
-        await checkReminders();
-        reminderInterval = window.setInterval(() => void checkReminders(), 30_000);
+        await runReminderCheck();
+        scheduleReminderCheck();
     },
 
     stop() {
-        if (reminderInterval !== undefined) {
-            window.clearInterval(reminderInterval);
-            reminderInterval = undefined;
-        }
-
+        running = false;
+        clearReminderTimer();
         listeners.clear();
     },
 });
